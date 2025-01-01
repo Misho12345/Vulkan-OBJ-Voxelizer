@@ -53,16 +53,13 @@ void main() {
         return;
     }
 
-    // Calculate aspect ratios based on Y being 1.0
     float y_scale = 1.0;
     float x_scale = 2.0 * float(image_size.x) / float(image_size.y);
     float z_scale = 2.0 * float(image_size.z) / float(image_size.y);
 
-    // Calculate voxel size based on the Y dimension
     float voxel_size_y = 1.0 / float(image_size.y);
     vec3 voxel_size = vec3(voxel_size_y * x_scale, voxel_size_y, voxel_size_y * z_scale);
 
-    // Calculate voxel bounds in normalized space
     vec3 voxel_min = vec3(
         pixel_coords.x * voxel_size.x,
         pixel_coords.y * voxel_size.y,
@@ -73,13 +70,10 @@ void main() {
     bool intersects = false;
 
     for (uint i = 0; i < index_count; i += 3) {
-        // Transform vertices to the normalized space where y ranges from 0 to 1
-        // and x/z are scaled according to the image dimensions
         vec3 v0 = vertices[indices[i + 0]].xyz * (0.5f * scale);
         vec3 v1 = vertices[indices[i + 1]].xyz * (0.5f * scale);
         vec3 v2 = vertices[indices[i + 2]].xyz * (0.5f * scale);
 
-        // Center the vertices and apply aspect ratio scaling
         v0 = vec3(v0.x * x_scale, v0.y * y_scale, v0.z * z_scale) + vec3(x_scale * 0.5, 0.5, z_scale * 0.5);
         v1 = vec3(v1.x * x_scale, v1.y * y_scale, v1.z * z_scale) + vec3(x_scale * 0.5, 0.5, z_scale * 0.5);
         v2 = vec3(v2.x * x_scale, v2.y * y_scale, v2.z * z_scale) + vec3(x_scale * 0.5, 0.5, z_scale * 0.5);
