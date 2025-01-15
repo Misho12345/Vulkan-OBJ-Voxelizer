@@ -1,28 +1,40 @@
 #pragma once
+#include "Instance.hpp"
+#include "pch.hpp"
 
 namespace boza
 {
     class Device final
     {
     public:
-        DELETE_CONSTRUCTORS(Device);
+        Device(nullptr_t) {}
+        explicit Device(const Instance& instance);
+        ~Device();
 
-        [[nodiscard]]
-        static bool create();
-        static void destroy();
+        Device(const Device&) = delete;
+        Device& operator=(const Device&) = delete;
 
-        STATIC_GETTER_CREF(physical_device);
-        STATIC_GETTER_CREF(logical_device);
-        STATIC_GETTER_CREF(compute_queue);
-        STATIC_GETTER_CREF(compute_queue_family_index);
+        Device(Device&& other) noexcept;
+        Device& operator=(Device&& other) noexcept;
+
+        operator bool() const { return ok; }
+
+        [[nodiscard]] const vk::Device&         get() const { return *logical_device; }
+        [[nodiscard]] const vk::PhysicalDevice& get_physical_device() const { return physical_device; }
+        [[nodiscard]] const vk::Queue&          get_compute_queue() const { return compute_queue; }
+
+        [[nodiscard]] uint32_t get_compute_queue_family_index() const { return compute_queue_family_index; }
 
     private:
-        [[nodiscard]] static bool choose_physical_device();
-        [[nodiscard]] static bool create_logical_device();
+        [[nodiscard]] bool choose_physical_device(const Instance& instance);
+        [[nodiscard]] bool create_logical_device();
 
-        inline static vk::PhysicalDevice physical_device;
-        inline static vk::Device         logical_device;
-        inline static vk::Queue          compute_queue;
-        inline static uint32_t           compute_queue_family_index{};
+        vk::PhysicalDevice physical_device;
+        vk::UniqueDevice   logical_device;
+
+        vk::Queue compute_queue;
+        uint32_t  compute_queue_family_index{};
+
+        bool ok = false;
     };
 }

@@ -6,7 +6,7 @@
 
 namespace boza
 {
-    bool TriangleLoader::loadFromObj(const std::string& filename, MeshData& outMeshData)
+    MeshData TriangleLoader::load_from_obj(const std::string& filename)
     {
         tinyobj::attrib_t                attrib;
         std::vector<tinyobj::shape_t>    shapes;
@@ -16,19 +16,18 @@ namespace boza
         if (!LoadObj(&attrib, &shapes, &materials, &warn, &err, filename.c_str()))
         {
             Logger::error("Failed to load OBJ file: {}", err);
-            return false;
+            return {};
         }
 
         if (!warn.empty()) Logger::warn(warn);
 
-        outMeshData.vertices.clear();
-        outMeshData.indices.clear();
+        MeshData out_mesh_data;
 
-        outMeshData.vertices.reserve(attrib.vertices.size() / 3);
+        out_mesh_data.vertices.reserve(attrib.vertices.size() / 3);
 
         for (size_t i = 0; i < attrib.vertices.size(); i += 3)
         {
-            outMeshData.vertices.emplace_back(
+            out_mesh_data.vertices.emplace_back(
                 attrib.vertices[i],
                 attrib.vertices[i + 1],
                 attrib.vertices[i + 2]
@@ -38,9 +37,9 @@ namespace boza
         for (const auto& shape : shapes)
         {
             for (const auto& index : shape.mesh.indices)
-                outMeshData.indices.push_back(static_cast<uint32_t>(index.vertex_index));
+                out_mesh_data.indices.push_back(static_cast<uint32_t>(index.vertex_index));
         }
 
-        return true;
+        return out_mesh_data;
     }
 }

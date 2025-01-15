@@ -6,35 +6,35 @@ namespace boza
     class Instance final
     {
     public:
-        DELETE_CONSTRUCTORS(Instance);
+        Instance(nullptr_t) noexcept {}
+        explicit Instance(const std::string_view& app_name);
+        ~Instance();
+
+        Instance(const Instance&) = delete;
+        Instance& operator=(const Instance&) = delete;
+
+        Instance(Instance&& other) noexcept;
+        Instance& operator=(Instance&& other) noexcept;
+
+        operator bool() const noexcept { return ok; }
 
         [[nodiscard]]
-        static bool create(const std::string_view& app_name);
-        static void destroy();
-
-        STATIC_GETTER_CREF(vk_instance);
+        const vk::Instance& get() const noexcept { return *instance; }
 
     private:
-        [[nodiscard]]
-        static bool check_extensions_and_layers_support(
+        [[nodiscard]] bool create_vk_instance(const std::string_view& app_name);
+        [[nodiscard]] bool check_extensions_and_layers_support(
             const std::span<const char*>& extensions,
             const std::span<const char*>& layers);
 
-        [[nodiscard]] static bool create_vk_instance(const std::string_view& app_name);
+        vk::UniqueInstance instance{ nullptr };
 
         #ifndef NDEBUG
         [[nodiscard]]
-        static bool create_debug_messenger();
-
-        static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
-            VkDebugUtilsMessageSeverityFlagBitsEXT      message_severity,
-            VkDebugUtilsMessageTypeFlagsEXT             message_type,
-            const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
-            void*                                       user_data);
-
-        inline static vk::DebugUtilsMessengerEXT debug_messenger;
+        bool create_debug_messenger();
+        vk::UniqueDebugUtilsMessengerEXT debug_messenger{ nullptr };
         #endif
 
-        inline static vk::Instance vk_instance;
+        bool ok = false;
     };
 }

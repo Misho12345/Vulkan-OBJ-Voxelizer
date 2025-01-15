@@ -1,334 +1,369 @@
-#include "pch.hpp"
 #include "ComputeShader.hpp"
 
-#include "Device.hpp"
 #include "Logger.hpp"
 
 namespace boza
 {
-    std::optional<ComputeShader> ComputeShader::create(
-        const std::string&                        shaderPath,
-        const std::vector<DescriptorBindingInfo>& descriptorBindings,
-        const std::vector<PushConstantRange>&     pushConstantRanges,
-        const vk::PipelineCache                         pipelineCache)
+    ComputeShader::ComputeShader(
+        const Device&                             device,
+        const std::string_view&                   shader_path,
+        const std::vector<DescriptorBindingInfo>& descriptor_bindings,
+        const std::vector<PushConstantRange>&     push_constant_ranges,
+        const vk::PipelineCache                   pipeline_cache)
+        : device{ std::cref(device) }, ok{ true }
     {
-        ComputeShader shader;
+        if (!create_shader_module(shader_path)) return;
+        if (!create_descriptor_set_layout(descriptor_bindings)) return;
+        if (!create_pipeline_layout(push_constant_ranges)) return;
+        if (!create_pipeline(pipeline_cache)) return;
+        if (!create_descriptor_pool_and_set(descriptor_bindings)) return;
 
-        BOZA_CHECK_RET_OPT(shader.create_shader_module(shaderPath), "Failed to create shader module");
-        BOZA_CHECK_RET_OPT(shader.create_descriptor_set_layout(descriptorBindings), "Failed to create descriptor set layout");
-        BOZA_CHECK_RET_OPT(shader.create_pipeline_layout(pushConstantRanges), "Failed to create pipeline layout");
-        BOZA_CHECK_RET_OPT(shader.create_pipeline(pipelineCache), "Failed to create pipeline");
-        BOZA_CHECK_RET_OPT(shader.create_descriptor_pool_and_set(descriptorBindings), "Failed to create descriptor pool and allocate descriptor set");
+        uint32_t total_push_constant_size = 0;
+        for (auto& pc : push_constant_ranges)
+            total_push_constant_size = std::max(total_push_constant_size, pc.offset + pc.size);
 
-        uint32_t totalPushConstantSize = 0;
-        for (auto& pc : pushConstantRanges)
-            totalPushConstantSize = std::max(totalPushConstantSize, pc.offset + pc.size);
-
-        shader.pushConstantBuffer.resize(totalPushConstantSize, 0);
-
-        return shader;
+        push_constant_buffer.resize(total_push_constant_size, 0);
     }
 
-
-    ComputeShader::~ComputeShader()
-    {
-        if (descriptorPool)      Device::get_logical_device().destroyDescriptorPool(descriptorPool);
-        if (pipeline)            Device::get_logical_device().destroyPipeline(pipeline);
-        if (pipelineLayout)      Device::get_logical_device().destroyPipelineLayout(pipelineLayout);
-        if (descriptorSetLayout) Device::get_logical_device().destroyDescriptorSetLayout(descriptorSetLayout);
-        if (shaderModule)        Device::get_logical_device().destroyShaderModule(shaderModule);
-    }
 
     ComputeShader::ComputeShader(ComputeShader&& other) noexcept
     {
-        shaderModule = other.shaderModule;
-        pipelineLayout = other.pipelineLayout;
-        pipeline = other.pipeline;
-        descriptorSetLayout = other.descriptorSetLayout;
-        descriptorPool = other.descriptorPool;
-        descriptorSet = other.descriptorSet;
-        pushConstantBuffer = std::move(other.pushConstantBuffer);
-        is_null = other.is_null;
+        shader_module         = std::move(other.shader_module);
+        pipeline_layout       = std::move(other.pipeline_layout);
+        pipeline              = std::move(other.pipeline);
+        descriptor_set_layout = std::move(other.descriptor_set_layout);
+        descriptor_pool       = std::move(other.descriptor_pool);
+        descriptor_set        = std::move(other.descriptor_set);
 
-        other.shaderModule = nullptr;
-        other.pipelineLayout = nullptr;
-        other.pipeline = nullptr;
-        other.descriptorSetLayout = nullptr;
-        other.descriptorPool = nullptr;
-        other.descriptorSet = nullptr;
-        other.is_null = true;
+        push_constant_buffer = std::exchange(other.push_constant_buffer, {});
+
+        ok = std::exchange(other.ok, false);
+
+        if (other.device) device = std::cref(other.device->get());
+        other.device = std::nullopt;
     }
 
     ComputeShader& ComputeShader::operator=(ComputeShader&& other) noexcept
     {
         if (this != &other)
         {
-            shaderModule = other.shaderModule;
-            pipelineLayout = other.pipelineLayout;
-            pipeline = other.pipeline;
-            descriptorSetLayout = other.descriptorSetLayout;
-            descriptorPool = other.descriptorPool;
-            descriptorSet = other.descriptorSet;
-            pushConstantBuffer = std::move(other.pushConstantBuffer);
-            is_null = other.is_null;
+            shader_module         = std::move(other.shader_module);
+            pipeline_layout       = std::move(other.pipeline_layout);
+            pipeline              = std::move(other.pipeline);
+            descriptor_set_layout = std::move(other.descriptor_set_layout);
+            descriptor_pool       = std::move(other.descriptor_pool);
+            descriptor_set        = std::move(other.descriptor_set);
 
-            other.shaderModule = nullptr;
-            other.pipelineLayout = nullptr;
-            other.pipeline = nullptr;
-            other.descriptorSetLayout = nullptr;
-            other.descriptorPool = nullptr;
-            other.descriptorSet = nullptr;
-            other.is_null = true;
+            push_constant_buffer = std::exchange(other.push_constant_buffer, {});
+
+            ok = std::exchange(other.ok, false);
+
+            if (other.device) device = std::cref(other.device->get());
+            other.device = std::nullopt;
         }
 
         return *this;
     }
 
-    bool ComputeShader::create_shader_module(const std::string& shaderPath)
+
+    void ComputeShader::update_storage_image(
+        const uint32_t        binding,
+        const vk::ImageView   image_view,
+        const vk::ImageLayout layout) const
+    {
+        const vk::DescriptorImageInfo image_info
+        {
+            {},
+            image_view, layout
+        };
+
+        vk::WriteDescriptorSet write
+        {
+            *descriptor_set,
+            binding,
+            0,
+            1,
+            vk::DescriptorType::eStorageImage,
+            &image_info,
+            nullptr,
+            nullptr
+        };
+
+        device->get().get().updateDescriptorSets({ write }, {});
+    }
+
+    void ComputeShader::update_storage_buffer(
+        const uint32_t       binding,
+        const vk::Buffer     buffer,
+        const vk::DeviceSize range,
+        const vk::DeviceSize offset) const
+    {
+        const vk::DescriptorBufferInfo buffer_info{ buffer, offset, range };
+
+        vk::WriteDescriptorSet write
+        {
+            *descriptor_set,
+            binding,
+            0,
+            1,
+            vk::DescriptorType::eStorageBuffer,
+            nullptr,
+            &buffer_info,
+            nullptr
+        };
+
+        device->get().get().updateDescriptorSets({ write }, {});
+    }
+
+    void ComputeShader::update_uniform_buffer(
+        const uint32_t       binding,
+        const vk::Buffer     buffer,
+        const vk::DeviceSize range,
+        const vk::DeviceSize offset) const
+    {
+        const vk::DescriptorBufferInfo buffer_info{ buffer, offset, range };
+
+        vk::WriteDescriptorSet write
+        {
+            *descriptor_set,
+            binding,
+            0,
+            1,
+            vk::DescriptorType::eUniformBuffer,
+            nullptr,
+            &buffer_info,
+            nullptr
+        };
+
+        device->get().get().updateDescriptorSets({ write }, {});
+    }
+
+    void ComputeShader::update_sampled_image(
+        const uint32_t        binding,
+        const vk::ImageView   image_view,
+        const vk::Sampler     sampler,
+        const vk::ImageLayout layout) const
+    {
+        const vk::DescriptorImageInfo image_info{ sampler, image_view, layout };
+
+        vk::WriteDescriptorSet write
+        {
+            *descriptor_set,
+            binding,
+            0,
+            1,
+            vk::DescriptorType::eCombinedImageSampler,
+            &image_info,
+            nullptr,
+            nullptr
+        };
+
+        device->get().get().updateDescriptorSets({ write }, {});
+    }
+
+    void ComputeShader::dispatch(
+        const vk::CommandBuffer command_buffer,
+        const uint32_t          group_count_x,
+        const uint32_t          group_count_y,
+        const uint32_t          group_count_z)
+    {
+        command_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, *pipeline);
+        command_buffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, *pipeline_layout, 0,
+                                          { *descriptor_set }, {});
+
+        if (!push_constant_buffer.empty())
+            command_buffer.pushConstants<uint8_t>(*pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+                                                  push_constant_buffer);
+
+        command_buffer.dispatch(group_count_x, group_count_y, group_count_z);
+    }
+
+
+    bool ComputeShader::create_shader_module(const std::string_view& shader_path)
     {
         namespace fs = std::filesystem;
-        const auto code = load_shader_binary((fs::current_path() / "shaders" / "spv" / (shaderPath + ".spv")).string());
-        if (code.empty()) return false;
+        const auto code = load_shader_binary(
+            (fs::current_path() / "shaders" / "spv" / (std::string(shader_path) + ".spv")).string());
 
-        const vk::ShaderModuleCreateInfo createInfo
+        if (code.empty())
+        {
+            Logger::error("Failed to load shader binary from {}", shader_path);
+            ok = false;
+            return false;
+        }
+
+        const vk::ShaderModuleCreateInfo create_info
         {
             {},
             code.size() * sizeof(uint32_t),
             code.data()
         };
 
-        vk::Result result;
-        std::tie(result, shaderModule) = Device::get_logical_device().createShaderModule(createInfo);
-        VK_CHECK(result, "Failed to create shader module");
+        auto [result, _shader_module] = device->get().get().createShaderModuleUnique(create_info);
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create shader module from {}", shader_path);
+            ok = false;
+            return false;
+        }
 
-        return shaderModule != nullptr;
+        shader_module = std::move(_shader_module);
+        return true;
     }
 
-    bool ComputeShader::create_descriptor_set_layout(const std::vector<DescriptorBindingInfo>& descriptorBindings)
+    bool ComputeShader::create_descriptor_set_layout(const std::vector<DescriptorBindingInfo>& descriptor_bindings)
     {
         std::vector<vk::DescriptorSetLayoutBinding> bindings;
-        bindings.reserve(descriptorBindings.size());
+        bindings.reserve(descriptor_bindings.size());
 
-        for (const auto& [binding, descriptorType, stageFlags, descriptorCount] : descriptorBindings)
+        for (const auto& [binding, descriptorType, stageFlags, descriptorCount] : descriptor_bindings)
         {
             vk::DescriptorSetLayoutBinding dsl_binding(binding, descriptorType, descriptorCount, stageFlags);
             bindings.push_back(dsl_binding);
         }
 
-        const vk::DescriptorSetLayoutCreateInfo layoutInfo
+        const vk::DescriptorSetLayoutCreateInfo layout_info
         {
             {},
             static_cast<uint32_t>(bindings.size()),
             bindings.data()
         };
 
-        vk::Result result;
-        std::tie(result, descriptorSetLayout) = Device::get_logical_device().createDescriptorSetLayout(layoutInfo);
-        VK_CHECK(result, "Failed to create descriptor set layout");
-
-        return descriptorSetLayout != nullptr;
-    }
-
-    bool ComputeShader::create_pipeline_layout(const std::vector<PushConstantRange>& pushConstantRanges)
-    {
-        std::vector<vk::PushConstantRange> vkPushRanges;
-        vkPushRanges.reserve(pushConstantRanges.size());
-        for (const auto& [stageFlags, offset, size] : pushConstantRanges)
+        auto [result, _descriptor_set_layout] = device->get().get().createDescriptorSetLayoutUnique(layout_info);
+        if (result != vk::Result::eSuccess)
         {
-            vk::PushConstantRange range(stageFlags, offset, size);
-            vkPushRanges.push_back(range);
+            Logger::error("Failed to create descriptor set layout");
+            ok = false;
+            return false;
         }
 
-        const vk::PipelineLayoutCreateInfo pipelineLayoutInfo
-        {
-            {},
-            1, &descriptorSetLayout,
-            static_cast<uint32_t>(vkPushRanges.size()), vkPushRanges.data()
-        };
-
-        vk::Result result;
-        std::tie(result, pipelineLayout) = Device::get_logical_device().createPipelineLayout(pipelineLayoutInfo);
-        VK_CHECK(result, "Failed to create pipeline layout");
-
-        return pipelineLayout != nullptr;
+        descriptor_set_layout = std::move(_descriptor_set_layout);
+        return true;
     }
 
-    bool ComputeShader::create_pipeline(const vk::PipelineCache pipelineCache)
+    bool ComputeShader::create_pipeline_layout(const std::vector<PushConstantRange>& push_constant_ranges)
     {
-        const vk::PipelineShaderStageCreateInfo stageInfo
+        std::vector<vk::PushConstantRange> push_ranges;
+        push_ranges.reserve(push_constant_ranges.size());
+        for (const auto& [stageFlags, offset, size] : push_constant_ranges)
+        {
+            vk::PushConstantRange range(stageFlags, offset, size);
+            push_ranges.push_back(range);
+        }
+
+        const vk::PipelineLayoutCreateInfo pipeline_layout_info
+        {
+            {},
+            1, &descriptor_set_layout.get(),
+            static_cast<uint32_t>(push_ranges.size()), push_ranges.data()
+        };
+
+        auto [result, _pipeline_layout] = device->get().get().createPipelineLayoutUnique(pipeline_layout_info);
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create pipeline layout");
+            ok = false;
+            return false;
+        }
+
+        pipeline_layout = std::move(_pipeline_layout);
+        return true;
+    }
+
+    bool ComputeShader::create_pipeline(const vk::PipelineCache pipeline_cache)
+    {
+        const vk::PipelineShaderStageCreateInfo stage_info
         {
             {},
             vk::ShaderStageFlagBits::eCompute,
-            shaderModule,
+            *shader_module,
             "main"
         };
 
-        const vk::ComputePipelineCreateInfo pipelineInfo
+        const vk::ComputePipelineCreateInfo pipeline_info
         {
             {},
-            stageInfo,
-            pipelineLayout
+            stage_info,
+            *pipeline_layout
         };
 
-        vk::Result result;
-        std::tie(result, pipeline) = Device::get_logical_device().createComputePipeline(pipelineCache, pipelineInfo);
-        VK_CHECK(result, "Failed to create compute pipeline");
+        auto [result, _pipeline] = device->get().get().createComputePipelineUnique(pipeline_cache, pipeline_info);
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create compute pipeline");
+            ok = false;
+            return false;
+        }
+
+        pipeline = std::move(_pipeline);
+        return true;
+    }
+
+    bool ComputeShader::create_descriptor_pool_and_set(const std::vector<DescriptorBindingInfo>& descriptor_bindings)
+    {
+        std::unordered_map<vk::DescriptorType, uint32_t> type_counts;
+        for (auto& b : descriptor_bindings)
+            type_counts[b.descriptorType] += b.descriptorCount;
+
+        std::vector<vk::DescriptorPoolSize> pool_sizes;
+        for (auto& [descriptor, count] : type_counts)
+            pool_sizes.emplace_back(descriptor, count);
+
+        const vk::DescriptorPoolCreateInfo pool_info
+        {
+            vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet,
+            1,
+            static_cast<uint32_t>(pool_sizes.size()),
+            pool_sizes.data()
+        };
+
+        auto [pool_result, _descriptor_pool] = device->get().get().createDescriptorPoolUnique(pool_info);
+        if (pool_result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create descriptor pool");
+            ok = false;
+            return false;
+        }
+
+        descriptor_pool = std::move(_descriptor_pool);
+
+        const vk::DescriptorSetAllocateInfo alloc_info
+        {
+            *descriptor_pool,
+            1, &descriptor_set_layout.get()
+        };
+
+        auto [set_result, _descriptor_set] = device->get().get().allocateDescriptorSetsUnique(alloc_info);
+
+        if (set_result != vk::Result::eSuccess || _descriptor_set.size() != 1)
+        {
+            Logger::error("Failed to allocate descriptor set");
+            ok = false;
+            return false;
+        }
+
+        descriptor_set = std::move(_descriptor_set[0]);
 
         return true;
     }
 
-    bool ComputeShader::create_descriptor_pool_and_set(const std::vector<DescriptorBindingInfo>& descriptorBindings)
+
+    std::vector<uint32_t> ComputeShader::load_shader_binary(const std::string_view& path)
     {
-        std::unordered_map<vk::DescriptorType, uint32_t> typeCounts;
-        for (auto& b : descriptorBindings)
-            typeCounts[b.descriptorType] += b.descriptorCount;
-
-        std::vector<vk::DescriptorPoolSize> poolSizes;
-        for (auto& [descriptor, count] : typeCounts)
-            poolSizes.emplace_back(descriptor, count);
-
-        const vk::DescriptorPoolCreateInfo poolInfo
+        std::ifstream file(path.data(), std::ios::ate | std::ios::binary);
+        if (!file.is_open())
         {
-            {},
-            1,
-            static_cast<uint32_t>(poolSizes.size()),
-            poolSizes.data()
-        };
+            Logger::error("Failed to open file {}", path);
+            return {};
+        }
 
-        vk::Result result;
-        std::tie(result, descriptorPool) = Device::get_logical_device().createDescriptorPool(poolInfo);
-        VK_CHECK(result, "Failed to create descriptor pool");
-
-        if (!descriptorPool) return false;
-
-        const vk::DescriptorSetAllocateInfo allocInfo
-        {
-            descriptorPool,
-            1, &descriptorSetLayout
-        };
-
-        std::vector<vk::DescriptorSet> temp;
-        std::tie(result, temp) = Device::get_logical_device().allocateDescriptorSets(allocInfo);
-
-        if (temp.size() != 1) return false;
-
-        descriptorSet = temp[0];
-        return descriptorSet != nullptr;
-    }
-
-    std::vector<uint32_t> ComputeShader::load_shader_binary(const std::string& path)
-    {
-        std::ifstream file(path, std::ios::ate | std::ios::binary);
-        if (!file.is_open()) return {};
-
-        const size_t fileSize = file.tellg();
-        std::vector<uint32_t> buffer(fileSize / sizeof(uint32_t));
+        const size_t          file_size = file.tellg();
+        std::vector<uint32_t> buffer(file_size / sizeof(uint32_t));
 
         file.seekg(0);
-        file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(fileSize));
+        file.read(reinterpret_cast<char*>(buffer.data()), static_cast<std::streamsize>(file_size));
         file.close();
 
         return buffer;
-    }
-
-    void ComputeShader::update_storage_image(const uint32_t binding, const vk::ImageView imageView, const vk::ImageLayout layout) const
-    {
-        BOZA_CHECK_RET_CUSTOM(!is_null, , "Failed to update storage image: shader is null");
-
-        const vk::DescriptorImageInfo imageInfo
-        {
-            {},
-            imageView, layout
-        };
-
-        vk::WriteDescriptorSet write
-        {
-            descriptorSet,
-            binding,
-            0,
-            1,
-            vk::DescriptorType::eStorageImage,
-            &imageInfo,
-            nullptr,
-            nullptr
-        };
-
-        Device::get_logical_device().updateDescriptorSets({ write }, {});
-    }
-
-    void ComputeShader::update_storage_buffer(const uint32_t binding, const vk::Buffer buffer, const vk::DeviceSize range, const vk::DeviceSize offset) const
-    {
-        BOZA_CHECK_RET_CUSTOM(!is_null, , "Failed to update storage buffer: shader is null");
-
-        const vk::DescriptorBufferInfo bufferInfo{ buffer, offset, range };
-
-        vk::WriteDescriptorSet write
-        {
-            descriptorSet,
-            binding,
-            0,
-            1,
-            vk::DescriptorType::eStorageBuffer,
-            nullptr,
-            &bufferInfo,
-            nullptr
-        };
-
-        Device::get_logical_device().updateDescriptorSets({ write }, {});
-    }
-
-    void ComputeShader::update_uniform_buffer(const uint32_t binding, const vk::Buffer buffer, const vk::DeviceSize range, const vk::DeviceSize offset) const
-    {
-        BOZA_CHECK_RET_CUSTOM(!is_null, , "Failed to update uniform buffer: shader is null");
-
-        const vk::DescriptorBufferInfo bufferInfo{ buffer, offset, range };
-
-        vk::WriteDescriptorSet write
-        {
-            descriptorSet,
-            binding,
-            0,
-            1,
-            vk::DescriptorType::eUniformBuffer,
-            nullptr,
-            &bufferInfo,
-            nullptr
-        };
-
-        Device::get_logical_device().updateDescriptorSets({ write }, {});
-    }
-
-    void ComputeShader::update_sampled_image(const uint32_t binding, const vk::ImageView imageView, const vk::Sampler sampler, const vk::ImageLayout layout) const
-    {
-        BOZA_CHECK_RET_CUSTOM(!is_null, , "Failed to update sampled image: shader is null");
-
-        const vk::DescriptorImageInfo imageInfo{ sampler, imageView, layout };
-
-        vk::WriteDescriptorSet write
-        {
-            descriptorSet,
-            binding,
-            0,
-            1,
-            vk::DescriptorType::eCombinedImageSampler,
-            &imageInfo,
-            nullptr,
-            nullptr
-        };
-
-        Device::get_logical_device().updateDescriptorSets({ write }, {});
-    }
-
-    void ComputeShader::dispatch(const vk::CommandBuffer commandBuffer, const uint32_t groupCountX, const uint32_t groupCountY, const uint32_t groupCountZ)
-    {
-        BOZA_CHECK_RET_CUSTOM(!is_null, , "Failed to dispatch compute shader: shader is null");
-
-        commandBuffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline);
-        commandBuffer.bindDescriptorSets(vk::PipelineBindPoint::eCompute, pipelineLayout, 0, { descriptorSet }, {});
-
-        if (!pushConstantBuffer.empty())
-            commandBuffer.pushConstants<uint8_t>(pipelineLayout, vk::ShaderStageFlagBits::eCompute, 0, pushConstantBuffer);
-
-        commandBuffer.dispatch(groupCountX, groupCountY, groupCountZ);
     }
 }

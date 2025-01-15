@@ -1,60 +1,19 @@
-#include "pch.hpp"
 #include "Image3D.hpp"
 
 #include "Buffer.hpp"
-#include "CommandPool.hpp"
-#include "Device.hpp"
 #include "Logger.hpp"
 
 namespace boza
 {
-    Image3D::Image3D(Image3D&& other) noexcept
+    Image3D::Image3D(
+        const Device&       device,
+        CommandPool&  command_pool,
+        vk::Format          format,
+        vk::Extent3D        extent,
+        vk::ImageUsageFlags usage,
+        bool                create_view)
+        : extent{ extent }, device{ std::cref(device) }, ok{ true }
     {
-        image       = other.image;
-        memory      = other.memory;
-        image_view  = other.image_view;
-        copy_buffer = other.copy_buffer;
-        extent      = other.extent;
-        is_null     = other.is_null;
-
-        other.image       = nullptr;
-        other.memory      = nullptr;
-        other.image_view  = nullptr;
-        other.copy_buffer = nullptr;
-        other.is_null     = true;
-    }
-
-    Image3D& Image3D::operator=(Image3D&& other) noexcept
-    {
-        if (this != &other)
-        {
-            image       = other.image;
-            memory      = other.memory;
-            image_view  = other.image_view;
-            copy_buffer = other.copy_buffer;
-            extent      = other.extent;
-            is_null     = other.is_null;
-
-            other.image       = nullptr;
-            other.memory      = nullptr;
-            other.image_view  = nullptr;
-            other.copy_buffer = nullptr;
-            other.is_null     = true;
-        }
-
-        return *this;
-    }
-
-    std::optional<Image3D> Image3D::create(
-        const vk::Format          format,
-        const vk::Extent3D        extent,
-        const vk::ImageUsageFlags usage,
-        const bool                createView)
-    {
-        Image3D img;
-
-        img.extent = extent;
-
         const vk::ImageCreateInfo image_create_info
         {
             {},
@@ -68,13 +27,19 @@ namespace boza
             usage
         };
 
-        vk::Result result;
-        std::tie(result, img.image) = Device::get_logical_device().createImage(image_create_info);
-        VK_CHECK_RET_OPT(result, "Failed to create image");
+        auto [img_result, img] = device.get().createImageUnique(image_create_info);
+        if (img_result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create image");
+            ok = false;
+            return;
+        }
 
-        const vk::MemoryRequirements mem_reqs = Device::get_logical_device().getImageMemoryRequirements(img.image);
+        image = std::move(img);
 
-        const auto mem_props = Device::get_physical_device().getMemoryProperties();
+        const vk::MemoryRequirements mem_reqs = device.get().getImageMemoryRequirements(image.get());
+
+        const auto mem_props = device.get_physical_device().getMemoryProperties();
         uint32_t   mem_type  = UINT32_MAX;
         for (uint32_t i = 0; i < mem_props.memoryTypeCount; i++)
         {
@@ -86,62 +51,129 @@ namespace boza
             }
         }
 
-        BOZA_CHECK_RET_OPT(mem_type != UINT32_MAX, "Failed to find suitable memory type for image");
+        if (mem_type == UINT32_MAX)
+        {
+            Logger::error("Failed to find suitable memory type for image");
+            ok = false;
+            return;
+        }
 
         const vk::MemoryAllocateInfo alloc_info{ mem_reqs.size, mem_type };
-        std::tie(result, img.memory) = Device::get_logical_device().allocateMemory(alloc_info);
-        VK_CHECK_RET_OPT(result, "Failed to allocate image memory");
 
-        VK_CHECK_RET_OPT(Device::get_logical_device().bindImageMemory(img.image, img.memory, 0),
-                         "Failed to bind image memory");
+        auto [mem_result, _memory] = device.get().allocateMemoryUnique(alloc_info);
 
-        if (createView)
+        if (mem_result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to allocate image memory");
+            ok = false;
+            return;
+        }
+
+        memory = std::move(_memory);
+
+        if (device.get().bindImageMemory(*image, *memory, 0) != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to bind image memory");
+            ok = false;
+            return;
+        }
+
+        if (create_view)
         {
             const vk::ImageViewCreateInfo view_info
             {
                 {},
-                img.image,
+                *image,
                 vk::ImageViewType::e3D,
                 format,
                 {},
                 { vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1 }
             };
 
-            std::tie(result, img.image_view) = Device::get_logical_device().createImageView(view_info);
-            VK_CHECK_RET_OPT(result, "Failed to create image view");
+            auto [view_result, _image_view] = device.get().createImageViewUnique(view_info);
+            if (view_result != vk::Result::eSuccess)
+            {
+                Logger::error("Failed to create image view");
+                ok = false;
+                return;
+            }
+            image_view = std::move(_image_view);
         }
 
-        const auto command_buf_opt = CommandPool::allocate_command_buffer();
-        if (!command_buf_opt.has_value()) return std::nullopt;
-        img.copy_buffer = command_buf_opt.value();
+        auto command_buffer_vec = command_pool.allocate_command_buffers(device, 1);
 
-        return img;
+        if (command_buffer_vec.empty())
+        {
+            Logger::error("Failed to allocate command buffer");
+            ok = false;
+            return;
+        }
+
+        copy_buffer = std::move(command_buffer_vec[0]);
     }
 
-    void Image3D::destroy() const
+    Image3D::Image3D(Image3D&& other) noexcept
     {
-        if (image_view) Device::get_logical_device().destroyImageView(image_view);
-        if (image) Device::get_logical_device().destroyImage(image);
-        if (memory) Device::get_logical_device().freeMemory(memory);
+        image = std::move(other.image);
+        memory = std::move(other.memory);
+        image_view = std::move(other.image_view);
+        copy_buffer = std::move(other.copy_buffer);
+
+        extent = std::exchange(other.extent, {});
+        ok = std::exchange(other.ok, false);
+
+        if (other.device) device = std::cref(other.device->get());
+        other.device = std::nullopt;
+    }
+
+    Image3D& Image3D::operator=(Image3D&& other) noexcept
+    {
+        if (this != &other)
+        {
+            image = std::move(other.image);
+            memory = std::move(other.memory);
+            image_view = std::move(other.image_view);
+            copy_buffer = std::move(other.copy_buffer);
+
+            extent = std::exchange(other.extent, {});
+            ok = std::exchange(other.ok, false);
+
+            if (other.device) device = std::cref(other.device->get());
+            other.device = std::nullopt;
+        }
+
+        return *this;
     }
 
     std::vector<uint8_t> Image3D::get_data() const
     {
-        BOZA_CHECK_RET_CUSTOM(!is_null, {}, "Failed to get image data: image is null");
+        const vk::DeviceSize total_size = device->get().get().getImageMemoryRequirements(*image).size;
 
-        const vk::DeviceSize total_size = Device::get_logical_device().getImageMemoryRequirements(image).size;
-
-        const auto staging_buffer_opt = Buffer::create(
+        Buffer staging_buffer
+        {
+            device->get(),
             total_size,
             vk::BufferUsageFlagBits::eTransferDst,
             vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent
-        );
-        BOZA_CHECK_RET_CUSTOM(staging_buffer_opt.has_value(), {}, "Failed to create staging buffer");
+        };
 
-        auto&& staging_buffer = *staging_buffer_opt;
+        if (!staging_buffer)
+        {
+            Logger::error("Failed to create staging buffer");
+            return {};
+        }
 
-        BOZA_CHECK_RET_CUSTOM(staging_buffer.bind(), {}, "Failed to bind staging buffer memory");
-        VK_CHECK_RET_CUSTOM(copy_buffer.begin({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }), {}, "Failed to begin copy command buffer");
+        if (!staging_buffer.bind())
+        {
+            Logger::error("Failed to bind staging buffer memory");
+            return {};
+        }
+
+        if (copy_buffer->begin({ vk::CommandBufferUsageFlagBits::eOneTimeSubmit }) != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to begin copy command buffer");
+            return {};
+        }
 
         vk::BufferImageCopy region
         {
@@ -152,26 +184,47 @@ namespace boza
             extent
         };
 
-        copy_buffer.copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, staging_buffer.get_buffer(), { region });
-        VK_CHECK_RET_CUSTOM(copy_buffer.end(), {}, "Failed to end copy command buffer");
+        copy_buffer->copyImageToBuffer(
+            *image,
+            vk::ImageLayout::eTransferSrcOptimal,
+            staging_buffer.get_buffer(),
+            { region }
+        );
+
+        if (copy_buffer->end() != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to end copy command buffer");
+            return {};
+        }
 
         vk::SubmitInfo submitInfo;
         submitInfo.commandBufferCount = 1;
-        submitInfo.pCommandBuffers = &copy_buffer;
+        submitInfo.pCommandBuffers = &copy_buffer.get();
 
-        VK_CHECK_RET_CUSTOM(
-        Device::get_compute_queue().submit(1, &submitInfo, {}), {}, "Failed to submit copy command buffer");
-        VK_CHECK_RET_CUSTOM(Device::get_compute_queue().waitIdle(), {}, "Failed to wait for copy command buffer");
 
-        auto [result, mapped] = Device::get_logical_device().mapMemory(staging_buffer.get_memory(), 0, vk::WholeSize);
-        VK_CHECK_RET_CUSTOM(result, {}, "Failed to map memory");
+        if (device->get().get_compute_queue().submit(1, &submitInfo, {}) != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to submit copy command buffer");
+            return {};
+        }
+
+        if (device->get().get_compute_queue().waitIdle() != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to wait for copy command buffer");
+            return {};
+        }
+
+        auto [result, mapped] = device->get().get().mapMemory(staging_buffer.get_memory(), 0, vk::WholeSize);
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to map memory");
+            return {};
+        }
 
         std::vector<uint8_t> image_data(total_size);
         std::memcpy(image_data.data(), mapped, total_size);
 
-        Device::get_logical_device().unmapMemory(staging_buffer.get_memory());
-        staging_buffer.destroy();
-
+        device->get().get().unmapMemory(staging_buffer.get_memory());
         return image_data;
     }
 }

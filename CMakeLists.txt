@@ -33,19 +33,18 @@ find_package(glm CONFIG REQUIRED)
 find_package(Stb REQUIRED)
 
 add_executable(${PROJECT_NAME}
+        src/main.cpp
         src/Boza/pch.hpp src/Boza/pch.cpp
+        src/Boza/macros.hpp
         src/Boza/Logger.hpp src/Boza/Logger.cpp
         src/Boza/App.hpp src/Boza/App.cpp
         src/Boza/Instance.hpp src/Boza/Instance.cpp
         src/Boza/Device.hpp src/Boza/Device.cpp
-        src/Boza/ComputeShader.hpp src/Boza/ComputeShader.cpp
         src/Boza/Buffer.hpp src/Boza/Buffer.cpp
         src/Boza/CommandPool.hpp src/Boza/CommandPool.cpp
         src/Boza/Image3D.hpp src/Boza/Image3D.cpp
         src/Boza/TriangleLoader.hpp src/Boza/TriangleLoader.cpp
-        src/Boza/check.hpp
-        src/ComputeApp.hpp src/ComputeApp.cpp
-        src/main.cpp
+        src/Boza/ComputeShader.hpp src/Boza/ComputeShader.cpp
 )
 
 target_precompile_headers(${PROJECT_NAME} PRIVATE src/Boza/pch.hpp)

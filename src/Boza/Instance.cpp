@@ -1,6 +1,4 @@
-#include "pch.hpp"
 #include "Instance.hpp"
-
 #include "Logger.hpp"
 
 namespace vk
@@ -11,38 +9,48 @@ namespace vk
 
 namespace boza
 {
-    static bool created = false;
-
-    bool Instance::create(const std::string_view& app_name)
+    Instance::Instance(const std::string_view& app_name) : ok{ true }
     {
-        assert(!created);
-        Logger::trace("Creating Vulkan instance");
-        created = true;
-
         vk::defaultDispatchLoaderDynamic = { vkGetInstanceProcAddr };
-        BOZA_CHECK(create_vk_instance(app_name), "Failed to create Vulkan instance");
+        if (!create_vk_instance(app_name)) return;
 
-        vk::defaultDispatchLoaderDynamic = { vk_instance, vkGetInstanceProcAddr };
-        DEBUG_ONLY(BOZA_CHECK(create_debug_messenger(), "Failed to create debug messenger"));
-
-        return true;
+        vk::defaultDispatchLoaderDynamic = { *instance, vkGetInstanceProcAddr };
+        DEBUG_ONLY(if (!create_debug_messenger()) return);
     }
 
-    void Instance::destroy()
+    Instance::~Instance()
     {
-        assert(created);
-        Logger::trace("Destroying Vulkan instance");
-        created = false;
+        if (ok) Logger::trace("Destroying Vulkan instance");
+    }
 
-        DEBUG_ONLY(vk_instance.destroyDebugUtilsMessengerEXT(debug_messenger));
-        vk_instance.destroy();
+
+    Instance::Instance(Instance&& other) noexcept
+    {
+        instance = std::move(other.instance);
+        ok = std::exchange(other.ok, false);
+    }
+
+    Instance& Instance::operator=(Instance&& other) noexcept
+    {
+        if (this != &other)
+        {
+            instance = std::move(other.instance);
+            ok = std::exchange(other.ok, false);
+        }
+
+        return *this;
     }
 
 
     bool Instance::create_vk_instance(const std::string_view& app_name)
     {
-        auto [result, version] = vk::enumerateInstanceVersion();
-        VK_CHECK(result, "Failed to get Vulkan instance version");
+        auto [version_res, version] = vk::enumerateInstanceVersion();
+        if (version_res != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to get Vulkan instance version");
+            ok = false;
+            return false;
+        }
 
         Logger::info("System can support Vulkan version {}.{}.{}",
                      vk::apiVersionMajor(version),
@@ -55,20 +63,17 @@ namespace boza
             vk::makeApiVersion(0, 0, 1, 0),
             "Boza",
             vk::makeApiVersion(0, 0, 1, 0),
-                version
+            version
         };
 
 
         std::vector<const char*> enabled_layers;
         std::vector<const char*> enabled_extensions;
 
-        #ifndef NDEBUG
-        enabled_layers.push_back(vk::LayerKhronosValidationName);
-        enabled_extensions.push_back(vk::EXTDebugUtilsExtensionName);
-        #endif
+        DEBUG_ONLY(enabled_layers.push_back(vk::LayerKhronosValidationName));
+        DEBUG_ONLY(enabled_extensions.push_back(vk::EXTDebugUtilsExtensionName));
 
-        BOZA_CHECK(check_extensions_and_layers_support(enabled_extensions, enabled_layers),
-                   "Failed to find required extensions or layers");
+        if (!check_extensions_and_layers_support(enabled_extensions, enabled_layers)) return false;
 
         const vk::InstanceCreateInfo create_info
         {
@@ -78,59 +83,18 @@ namespace boza
             static_cast<uint32_t>(enabled_extensions.size()), enabled_extensions.data()
         };
 
-        std::tie(result, vk_instance) = createInstance(create_info);
-        VK_CHECK(result, "Failed to create Vulkan instance");
+        auto [instance_result, _instance] = createInstanceUnique(create_info);
+        if (instance_result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create Vulkan instance");
+            ok = false;
+            return false;
+        }
 
+        instance = std::move(_instance);
         Logger::trace("Vulkan instance created");
         return true;
     }
-
-
-    #ifndef NDEBUG
-    VKAPI_ATTR VkBool32 VKAPI_CALL Instance::debug_callback(
-        VkDebugUtilsMessageSeverityFlagBitsEXT      message_severity,
-        const VkDebugUtilsMessageTypeFlagsEXT       message_type,
-        const VkDebugUtilsMessengerCallbackDataEXT* callback_data,
-        void*)
-    {
-        const auto cpp_message_type = static_cast<vk::DebugUtilsMessageTypeFlagsEXT>(message_type);
-
-        using enum vk::DebugUtilsMessageSeverityFlagBitsEXT;
-        switch (static_cast<vk::DebugUtilsMessageSeverityFlagBitsEXT>(message_severity))
-        {
-        case eVerbose: Logger::trace("Validation layer {}: {}", to_string(cpp_message_type), callback_data->pMessage); break;
-        case eInfo: Logger::info("Validation layer {}: {}", to_string(cpp_message_type), callback_data->pMessage); break;
-        case eWarning: Logger::warn("Validation layer {}: {}", to_string(cpp_message_type), callback_data->pMessage); break;
-        case eError: Logger::error("Validation layer {}: {}", to_string(cpp_message_type), callback_data->pMessage); break;
-        }
-
-        return vk::False;
-    }
-
-    bool Instance::create_debug_messenger()
-    {
-        using enum vk::DebugUtilsMessageSeverityFlagBitsEXT;
-        using enum vk::DebugUtilsMessageTypeFlagBitsEXT;
-
-        constexpr vk::DebugUtilsMessengerCreateInfoEXT create_info
-        {
-            {},
-
-            /*eVerbose | eInfo |*/ eWarning | eError,
-            eGeneral | eValidation | ePerformance,
-
-            debug_callback,
-            nullptr
-        };
-
-        vk::Result result;
-        std::tie(result, debug_messenger) = vk_instance.createDebugUtilsMessengerEXT(create_info);
-        VK_CHECK(result, "Failed to create debug messenger");
-
-        Logger::trace("Debug messenger created");
-        return true;
-    }
-    #endif
 
     bool Instance::check_extensions_and_layers_support(
         const std::span<const char*>& extensions,
@@ -143,10 +107,20 @@ namespace boza
         std::vector<vk::LayerProperties>     supported_layers;
 
         std::tie(result, supported_extensions) = vk::enumerateInstanceExtensionProperties();
-        VK_CHECK(result, "Failed to enumerate instance extensions");
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to enumerate instance extensions");
+            ok = false;
+            return false;
+        }
 
         std::tie(result, supported_layers) = vk::enumerateInstanceLayerProperties();
-        VK_CHECK(result, "Failed to enumerate instance layers");
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to enumerate instance layers");
+            ok = false;
+            return false;
+        }
 
         #ifndef NDEBUG
         std::string required_extensions_str = "Required extensions:";
@@ -167,7 +141,12 @@ namespace boza
                 }
             }
 
-            if (!found) return false;
+            if (!found)
+            {
+                Logger::error("Extension {} is not supported", extension);
+                ok = false;
+                return false;
+            }
         }
 
         #ifndef NDEBUG
@@ -194,10 +173,65 @@ namespace boza
                 if (layer == vk::LayerKhronosValidationName)
                     Logger::trace("If you use Debug mode, make sure to have the Vulkan SDK installed on your computer");
 
+                ok = false;
                 return false;
             }
         }
 
         return true;
     }
+
+
+    #ifndef NDEBUG
+    bool Instance::create_debug_messenger()
+    {
+        using enum vk::DebugUtilsMessageSeverityFlagBitsEXT;
+        using enum vk::DebugUtilsMessageTypeFlagBitsEXT;
+
+        constexpr vk::DebugUtilsMessengerCreateInfoEXT create_info
+        {
+            {},
+
+            /*eVerbose | eInfo |*/ eWarning | eError,
+            eGeneral | eValidation | ePerformance,
+
+            [](
+                const VkDebugUtilsMessageSeverityFlagBitsEXT message_severity,
+                const VkDebugUtilsMessageTypeFlagsEXT        message_type,
+                const VkDebugUtilsMessengerCallbackDataEXT*  callback_data,
+                void*                                        user_data[[maybe_unused]]) -> VkBool32
+            {
+                const auto cpp_message_type = static_cast<vk::DebugUtilsMessageTypeFlagsEXT>(message_type);
+
+                const std::string message = std::format("Validation layer {}: {}",
+                    to_string(cpp_message_type), callback_data->pMessage);
+
+                using enum vk::DebugUtilsMessageSeverityFlagBitsEXT;
+                switch (static_cast<vk::DebugUtilsMessageSeverityFlagBitsEXT>(message_severity))
+                {
+                case eVerbose: Logger::trace(message); break;
+                case eInfo:    Logger::info (message); break;
+                case eWarning: Logger::warn (message); break;
+                case eError:   Logger::error(message); break;
+                }
+
+                return vk::False;
+            },
+
+            nullptr
+        };
+
+        auto [result, _debug_messenger] = instance->createDebugUtilsMessengerEXTUnique(create_info);
+        if (result != vk::Result::eSuccess)
+        {
+            Logger::error("Failed to create debug messenger");
+            ok = false;
+            return false;
+        }
+
+        debug_messenger = std::move(_debug_messenger);
+        Logger::trace("Debug messenger created");
+        return true;
+    }
+    #endif
 }

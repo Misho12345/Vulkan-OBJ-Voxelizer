@@ -1,12 +1,20 @@
 #pragma once
 #include "pch.hpp"
+#include "Device.hpp"
 
 namespace boza
 {
     class Buffer final
     {
     public:
-        Buffer(std::nullptr_t) : is_null(true) {}
+        Buffer(nullptr_t) {}
+
+        Buffer(const Device&           device,
+               vk::DeviceSize          size,
+               vk::BufferUsageFlags    usage,
+               vk::MemoryPropertyFlags properties);
+
+        static Buffer uniform_buffer(const Device& device, vk::DeviceSize size);
 
         Buffer(const Buffer&)            = delete;
         Buffer& operator=(const Buffer&) = delete;
@@ -14,32 +22,25 @@ namespace boza
         Buffer(Buffer&& other) noexcept;
         Buffer& operator=(Buffer&& other) noexcept;
 
-        [[nodiscard]]
-        static std::optional<Buffer> create(
-            vk::DeviceSize          size,
-            vk::BufferUsageFlags    usage,
-            vk::MemoryPropertyFlags properties);
+        operator bool () const noexcept { return ok; }
 
-        void destroy() const;
+
+        [[nodiscard]] bool copy_data(const void* data, vk::DeviceSize size);
+        [[nodiscard]] bool bind();
 
         [[nodiscard]]
-        static std::optional<Buffer> create_uniform_buffer(vk::DeviceSize size);
+        bool update_uniform(const void* data, vk::DeviceSize size);
 
-        [[nodiscard]] bool copy_data(const void* data, vk::DeviceSize size) const;
-        [[nodiscard]] bool bind() const;
-
-        bool update_uniform(const void* data, vk::DeviceSize size) const;
-
-        GETTER_CREF(buffer);
-        GETTER_CREF(memory);
+        [[nodiscard]] const vk::Buffer&       get_buffer() const { return *buffer; }
+        [[nodiscard]] const vk::DeviceMemory& get_memory() const { return *memory; }
 
     private:
-        Buffer() = default;
+        vk::UniqueBuffer       buffer{ nullptr };
+        vk::UniqueDeviceMemory memory{ nullptr };
+        vk::DeviceSize         size{};
 
-        bool is_null{ false };
+        std::optional<std::reference_wrapper<const Device>> device { std::nullopt };
 
-        vk::Buffer       buffer{ nullptr };
-        vk::DeviceMemory memory{ nullptr };
-        vk::DeviceSize   size{};
+        bool ok = false;
     };
 }

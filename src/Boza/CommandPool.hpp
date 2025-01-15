@@ -1,28 +1,36 @@
 #pragma once
 #include "pch.hpp"
+#include "Device.hpp"
 
 namespace boza
 {
     class CommandPool final
     {
     public:
-        DELETE_CONSTRUCTORS(CommandPool);
+        CommandPool(nullptr_t) {}
+        explicit CommandPool(const Device& device);
+        ~CommandPool();
+
+        CommandPool(const CommandPool&) = delete;
+        CommandPool& operator=(const CommandPool&) = delete;
+
+        CommandPool(CommandPool&& other) noexcept;
+        CommandPool& operator=(CommandPool&& other) noexcept;
+
+        operator bool () const noexcept { return ok; }
 
         [[nodiscard]]
-        static bool create();
-        static void destroy();
+        std::vector<vk::UniqueCommandBuffer> allocate_command_buffers(const Device& device, uint32_t count);
 
-        [[nodiscard]] static std::optional<vk::CommandBuffer> allocate_command_buffer();
-        [[nodiscard]] static std::vector<vk::CommandBuffer> allocate_command_buffers(uint32_t count);
-
-        STATIC_GETTER_CREF(command_pool);
-        STATIC_GETTER_CREF(command_buffer);
+        [[nodiscard]] const vk::CommandPool&   get() const { return *command_pool; }
+        [[nodiscard]] const vk::CommandBuffer& get_command_buffer() const { return *command_buffer; }
 
     private:
-        [[nodiscard]] static bool create_command_pool();
-        [[nodiscard]] static bool create_command_buffer();
+        bool create_command_pool(const Device& device);
 
-        inline static vk::CommandPool   command_pool;
-        inline static vk::CommandBuffer command_buffer;
+        vk::UniqueCommandPool command_pool;
+        vk::UniqueCommandBuffer command_buffer;
+
+        bool ok = false;
     };
 }

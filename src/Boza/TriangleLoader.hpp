@@ -3,15 +3,18 @@
 
 namespace boza
 {
-    struct MeshData
+    struct MeshData final
     {
         std::vector<glm::vec3> vertices;
         std::vector<uint32_t> indices;
+
+        operator bool () const { return !vertices.empty() && !indices.empty(); }
     };
 
-    class TriangleLoader
+    class TriangleLoader final
     {
     public:
-        static bool loadFromObj(const std::string& filename, MeshData& outMeshData);
+        TriangleLoader() = delete;
+        static MeshData load_from_obj(const std::string& filename);
     };
 }

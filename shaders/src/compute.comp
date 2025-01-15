@@ -18,31 +18,19 @@ layout(set = 0, binding = 3) uniform Params {
 };
 
 bool triangleAABBIntersect(vec3 v0, vec3 v1, vec3 v2, vec3 boxMin, vec3 boxMax) {
-    vec3 triangleMin = min(v0, min(v1, v2));
-    vec3 triangleMax = max(v0, max(v1, v2));
-
-    if (any(greaterThan(boxMin, triangleMax)) || any(lessThan(boxMax, triangleMin))) {
-        return false;
-    }
-
     vec3 e0 = v1 - v0;
     vec3 e1 = v2 - v1;
     vec3 e2 = v0 - v2;
 
-    vec3 boxHalfSize = (boxMax - boxMin) * 0.5;
-    vec3 boxCenter = (boxMax + boxMin) * 0.5;
+    vec3 boxCenter = 0.5 * (boxMin + boxMax);
+    vec3 boxHalfSize = 0.5 * (boxMax - boxMin);
     vec3 v0r = v0 - boxCenter;
 
     vec3 normal = cross(e0, e1);
-    float rad = boxHalfSize.x * abs(normal.x) +
-                boxHalfSize.y * abs(normal.y) +
-                boxHalfSize.z * abs(normal.z);
+    float rad = dot(boxHalfSize, abs(normal));
     float s = dot(normal, v0r);
-    if (abs(s) > rad) {
-        return false;
-    }
 
-    return true;
+    return abs(s) <= rad;
 }
 
 void main() {
@@ -53,30 +41,25 @@ void main() {
         return;
     }
 
+    float inv_image_y = 1.0 / float(image_size.y);
+    float x_scale = 2.0 * float(image_size.x) * inv_image_y;
     float y_scale = 1.0;
-    float x_scale = 2.0 * float(image_size.x) / float(image_size.y);
-    float z_scale = 2.0 * float(image_size.z) / float(image_size.y);
+    float z_scale = 2.0 * float(image_size.z) * inv_image_y;
 
-    float voxel_size_y = 1.0 / float(image_size.y);
-    vec3 voxel_size = vec3(voxel_size_y * x_scale, voxel_size_y, voxel_size_y * z_scale);
-
-    vec3 voxel_min = vec3(
-        pixel_coords.x * voxel_size.x,
-        pixel_coords.y * voxel_size.y,
-        pixel_coords.z * voxel_size.z
-    );
+    vec3 voxel_size = vec3(x_scale, y_scale, z_scale) * inv_image_y;
+    vec3 voxel_min = vec3(pixel_coords) * voxel_size;
     vec3 voxel_max = voxel_min + voxel_size;
 
     bool intersects = false;
-
     for (uint i = 0; i < index_count; i += 3) {
-        vec3 v0 = vertices[indices[i + 0]].xyz * (0.5f * scale);
-        vec3 v1 = vertices[indices[i + 1]].xyz * (0.5f * scale);
-        vec3 v2 = vertices[indices[i + 2]].xyz * (0.5f * scale);
+        vec3 v0 = vertices[indices[i + 0]].xyz * 0.5 * scale;
+        vec3 v1 = vertices[indices[i + 1]].xyz * 0.5 * scale;
+        vec3 v2 = vertices[indices[i + 2]].xyz * 0.5 * scale;
 
-        v0 = vec3(v0.x * x_scale, v0.y * y_scale, v0.z * z_scale) + vec3(x_scale * 0.5, 0.5, z_scale * 0.5);
-        v1 = vec3(v1.x * x_scale, v1.y * y_scale, v1.z * z_scale) + vec3(x_scale * 0.5, 0.5, z_scale * 0.5);
-        v2 = vec3(v2.x * x_scale, v2.y * y_scale, v2.z * z_scale) + vec3(x_scale * 0.5, 0.5, z_scale * 0.5);
+        vec3 scale_offset = vec3(0.5 * x_scale, 0.5, 0.5 * z_scale);
+        v0 = v0 * vec3(x_scale, y_scale, z_scale) + scale_offset;
+        v1 = v1 * vec3(x_scale, y_scale, z_scale) + scale_offset;
+        v2 = v2 * vec3(x_scale, y_scale, z_scale) + scale_offset;
 
         if (triangleAABBIntersect(v0, v1, v2, voxel_min, voxel_max)) {
             intersects = true;
@@ -84,6 +67,6 @@ void main() {
         }
     }
 
-    vec4 color = intersects ? vec4(0.0, 1.0, 0.0, 1.0) : vec4(0.0);
+    vec4 color = intersects ? vec4(1.0, 0.0, 0.0, 1.0) : vec4(0.0);
     imageStore(output_image, pixel_coords, color);
 }

@@ -32,23 +32,4 @@
 #include <cassert>
 #include <ctime>
 
-#include "check.hpp"
-
-#ifdef NDEBUG
-#define DEBUG_ONLY(X) (void)0
-#else
-#define DEBUG_ONLY(X) X
-#endif
-
-#define GETTER(name) [[nodiscard]] auto get_##name() const { return name; }
-#define GETTER_CREF(name) [[nodiscard]] const auto& get_##name() const { return name; }
-#define STATIC_GETTER(name) [[nodiscard]] static auto get_##name() { return name; }
-#define STATIC_GETTER_CREF(name) [[nodiscard]] static const auto& get_##name() { return name; }
-
-#define DELETE_CONSTRUCTORS(class_name)                \
-    class_name()                             = delete; \
-    class_name(const class_name&)            = delete; \
-    class_name(class_name&&)                 = delete; \
-    class_name& operator=(const class_name&) = delete; \
-    class_name& operator=(class_name&&)      = delete; \
-    ~class_name()                            = delete
+#include "macros.hpp"
